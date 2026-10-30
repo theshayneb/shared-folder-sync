@@ -114,5 +114,6 @@ Google's services, with two simulated vaults syncing through it.
 
 To release, bump `version` in `manifest.json`, `package.json` and
 `versions.json`, commit, and push a tag equal to the version
-(`git tag 0.1.1 && git push origin 0.1.1`). The release workflow publishes
+(`git tag 0.1.1 && git push origin 0.1.1`), or run the **Release** workflow
+from the Actions tab, which tags the version in `manifest.json`. It publishes
 `main.js` and `manifest.json`, which BRAT installs.
