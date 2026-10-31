@@ -50,3 +50,8 @@ export function inScope(scope: ShareScope, path: string): boolean {
 	}
 	return scope.folders.some((folder) => path.startsWith(folder + "/"));
 }
+
+/** A stable string for comparing two scopes. */
+export function scopeKey(scope: ShareScope): string {
+	return JSON.stringify({ folders: scope.folders, files: scope.files });
+}

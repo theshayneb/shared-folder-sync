@@ -1,48 +1,63 @@
-import { Notice, Plugin, TAbstractFile } from "obsidian";
-import { encodeInvite } from "./invite";
-import { inScope, parsePathList, ShareScope } from "./scope";
+import { App, FuzzySuggestModal, Notice, Plugin, TAbstractFile } from "obsidian";
+import { encodeInvite, Invite } from "./invite";
+import { inScope, parsePathList, ShareScope, scopeKey } from "./scope";
 import {
 	DEFAULT_SETTINGS,
+	migrateData,
 	MIN_INTERVAL_SECONDS,
+	PluginData,
+	ShareConfig,
 	SharedFolderSyncSettings,
-	SharedFolderSyncSettingTab,
-} from "./settings";
+} from "./config";
+import { SharedFolderSyncSettingTab } from "./settings";
 import { emptyState, runSync, SyncState } from "./sync-engine";
-import { createTransport, pingMailbox } from "./transport";
+import { createShare, createTransport, MailboxError, pingMailbox, revokeShare } from "./transport";
 import { VaultStore } from "./vault-store";
 
-interface PluginData {
-	settings: SharedFolderSyncSettings;
-	/**
-	 * Sync progress per device. data.json can itself be copied between your
-	 * own devices (for example by Obsidian Sync), so each device keeps its own
-	 * entry, keyed by an id that never leaves the device.
-	 */
-	states: Record<string, SyncState>;
-}
-
-const DEVICE_ID_KEY = "shared-folder-sync-device-id";
-
 interface SettingsChange {
-	connectionChanged?: boolean;
 	scopeChanged?: boolean;
 	intervalChanged?: boolean;
 }
 
+const DEVICE_ID_KEY = "shared-folder-sync-device-id";
+
 /** Wait this long after the last edit to a shared file before syncing. */
 const EDIT_DEBOUNCE_MS = 3000;
 
+function newId(): string {
+	return Math.random().toString(36).slice(2, 10);
+}
+
+class ShareSuggestModal extends FuzzySuggestModal<ShareConfig> {
+	constructor(
+		app: App,
+		private readonly shares: ShareConfig[],
+		private readonly onPick: (share: ShareConfig) => void,
+	) {
+		super(app);
+		this.setPlaceholder("Pick a share to copy its invite");
+	}
+	getItems(): ShareConfig[] {
+		return this.shares;
+	}
+	getItemText(share: ShareConfig): string {
+		return share.name;
+	}
+	onChooseItem(share: ShareConfig): void {
+		this.onPick(share);
+	}
+}
+
 export default class SharedFolderSyncPlugin extends Plugin {
-	settings: SharedFolderSyncSettings = { ...DEFAULT_SETTINGS };
+	settings: SharedFolderSyncSettings = { ...DEFAULT_SETTINGS, shares: [] };
 	private deviceId = "";
-	private states: Record<string, SyncState> = {};
-	private state: SyncState = emptyState();
+	private states: Record<string, Record<string, SyncState>> = {};
 	private running = false;
 	private runAgain = false;
 	private intervalId: number | null = null;
 	private editTimer: number | null = null;
-	private lastStatus = "Not synced yet.";
-	private lastErrorShown = "";
+	private statuses = new Map<string, string>();
+	private lastErrorShown = new Map<string, string>();
 
 	async onload(): Promise<void> {
 		await this.loadPluginData();
@@ -50,19 +65,28 @@ export default class SharedFolderSyncPlugin extends Plugin {
 
 		this.addCommand({
 			id: "sync-now",
-			name: "Sync now",
+			name: "Sync all shares now",
 			callback: () => void this.syncNow(true),
 		});
 		this.addCommand({
 			id: "copy-invite",
-			name: "Copy invite for the other person",
-			callback: () => void this.copyInvite(),
+			name: "Copy invite for a share",
+			callback: () => {
+				if (this.settings.shares.length === 0) {
+					new Notice("There are no shares yet. Create one in settings.");
+					return;
+				}
+				new ShareSuggestModal(this.app, this.settings.shares, (share) => void this.copyInvite(share)).open();
+			},
 		});
-		this.addRibbonIcon("refresh-cw", "Sync shared folder", () => void this.syncNow(true));
+		this.addRibbonIcon("refresh-cw", "Sync shared folders", () => void this.syncNow(true));
 
 		const onVaultChange = (file: TAbstractFile, oldPath?: string) => {
-			const scope = this.scope();
-			if (inScope(scope, file.path) || (oldPath !== undefined && inScope(scope, oldPath))) {
+			const touched = this.settings.shares.some((share) => {
+				const scope = this.scopeOf(share);
+				return inScope(scope, file.path) || (oldPath !== undefined && inScope(scope, oldPath));
+			});
+			if (touched) {
 				this.scheduleEditSync();
 			}
 		};
@@ -90,28 +114,41 @@ export default class SharedFolderSyncPlugin extends Plugin {
 		}
 	}
 
-	scope(): ShareScope {
-		return { folders: parsePathList(this.settings.folders), files: parsePathList(this.settings.files) };
+	scopeOf(share: ShareConfig): ShareScope {
+		return { folders: parsePathList(share.folders), files: parsePathList(share.files) };
 	}
 
-	private isConfigured(): boolean {
-		const scope = this.scope();
-		return (
-			this.settings.webAppUrl !== "" &&
-			this.settings.shareCode !== "" &&
-			scope.folders.length + scope.files.length > 0
-		);
+	/** Shares in your own mailbox, whose paths this vault sets for everyone. */
+	isOwnedShare(share: ShareConfig): boolean {
+		return this.settings.ownerCode !== "" && share.webAppUrl === this.settings.mailboxUrl;
 	}
 
-	statusText(): string {
-		return this.lastStatus;
+	private hasMailbox(): boolean {
+		return this.settings.mailboxUrl !== "" && this.settings.ownerCode !== "";
 	}
 
-	async syncNow(manual: boolean): Promise<void> {
-		if (!this.isConfigured()) {
-			if (manual) {
-				new Notice("Set the web app URL, share code and at least one shared folder or file first.");
-			}
+	private canSync(share: ShareConfig): boolean {
+		if (share.webAppUrl === "" || share.shareCode === "") {
+			return false;
+		}
+		// A joined share with no paths yet still syncs, to learn them.
+		const scope = this.scopeOf(share);
+		return share.joined || scope.folders.length + scope.files.length > 0;
+	}
+
+	statusText(share: ShareConfig): string {
+		if (!this.canSync(share)) {
+			return "Add at least one folder or file to start sharing.";
+		}
+		return this.statuses.get(share.id) ?? "Not synced yet.";
+	}
+
+	/** Syncs every share, or only `onlyShareId`. */
+	async syncNow(manual: boolean, onlyShareId?: string): Promise<void> {
+		const pick = (all: boolean) =>
+			this.settings.shares.filter((s) => all || onlyShareId === undefined || s.id === onlyShareId);
+		if (manual && !pick(false).some((s) => this.canSync(s))) {
+			new Notice("There's nothing to sync yet. Add folders or files to a share in settings.");
 			return;
 		}
 		if (this.running) {
@@ -120,76 +157,182 @@ export default class SharedFolderSyncPlugin extends Plugin {
 		}
 		this.running = true;
 		try {
-			let pushed = 0;
-			let pulled = 0;
+			// A request made while this ran may be for any share (a new
+			// join, say), so repeat passes cover them all.
+			let first = true;
 			do {
 				this.runAgain = false;
-				const summary = await runSync({
-					store: new VaultStore(this.app, this.scope()),
-					transport: createTransport(this.settings.webAppUrl, this.settings.shareCode),
-					scope: this.scope(),
-					device: this.deviceId,
-					state: this.state,
-					saveState: () => this.savePluginData(),
-				});
-				pushed += summary.pushed;
-				pulled += summary.pulled;
+				for (const share of pick(!first)) {
+					if (this.canSync(share) && this.settings.shares.includes(share)) {
+						await this.syncShare(share, manual);
+					}
+				}
+				first = false;
 			} while (this.runAgain);
-			this.lastStatus = `Last synced ${new Date().toLocaleTimeString()}.`;
-			this.lastErrorShown = "";
-			if (manual) {
-				new Notice(`Shared folder synced: ${pushed} sent, ${pulled} received.`);
-			}
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			this.lastStatus = `Sync failed: ${message}`;
-			// Background syncs repeat; show each distinct failure once.
-			if (manual || message !== this.lastErrorShown) {
-				new Notice(`Shared folder sync failed: ${message}`);
-				this.lastErrorShown = message;
-			}
 		} finally {
 			this.running = false;
 		}
 	}
 
-	async testConnection(): Promise<void> {
+	private async syncShare(share: ShareConfig, manual: boolean): Promise<void> {
 		try {
-			await pingMailbox(this.settings.webAppUrl, this.settings.shareCode);
-			new Notice("Connected to the mailbox.");
+			let pushed = 0;
+			let pulled = 0;
+			// The second pass runs only when the owner changed the paths.
+			for (let pass = 0; pass < 2; pass++) {
+				const scope = this.scopeOf(share);
+				const summary = await runSync({
+					store: new VaultStore(this.app, scope),
+					transport: createTransport(share.webAppUrl, share.shareCode),
+					scope,
+					device: this.deviceId,
+					state: this.stateFor(share),
+					ownerKey: this.isOwnedShare(share) && !share.joined ? this.settings.ownerCode : undefined,
+					saveState: () => this.savePluginData(),
+				});
+				pushed += summary.pushed;
+				pulled += summary.pulled;
+				const remote = summary.remoteScope;
+				if (!share.joined || !remote || scopeKey(remote) === scopeKey(scope)) {
+					break;
+				}
+				share.folders = remote.folders.join("\n");
+				share.files = remote.files.join("\n");
+				await this.savePluginData();
+			}
+			this.statuses.set(share.id, `Last synced ${new Date().toLocaleTimeString()}.`);
+			this.lastErrorShown.delete(share.id);
+			if (manual) {
+				new Notice(`${share.name} synced: ${pushed} sent, ${pulled} received.`);
+			}
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			this.statuses.set(share.id, `Sync failed: ${message}`);
+			// Background syncs repeat; show each distinct failure once.
+			if (manual || message !== this.lastErrorShown.get(share.id)) {
+				new Notice(`${share.name} didn't sync: ${message}`);
+				this.lastErrorShown.set(share.id, message);
+			}
+		}
+	}
+
+	async testMailbox(): Promise<void> {
+		if (!this.hasMailbox()) {
+			new Notice("Enter the web app URL and owner code first.");
+			return;
+		}
+		try {
+			const { owner } = await pingMailbox(this.settings.mailboxUrl, this.settings.ownerCode);
+			new Notice(
+				owner
+					? "Connected to your mailbox."
+					: "That's a share code, not the owner code. The owner code is printed by setup.",
+			);
 		} catch (error) {
 			new Notice(error instanceof Error ? error.message : String(error));
 		}
 	}
 
-	async copyInvite(): Promise<void> {
-		if (!this.isConfigured()) {
-			new Notice("Set the web app URL, share code and at least one shared folder or file first.");
+	/** Returns true when the share was created. */
+	async createShare(name: string): Promise<boolean> {
+		const cleanName = name.trim() || "Shared folder";
+		try {
+			const code = await createShare(this.settings.mailboxUrl, this.settings.ownerCode, cleanName);
+			this.settings.shares.push({
+				id: newId(),
+				name: cleanName,
+				webAppUrl: this.settings.mailboxUrl,
+				shareCode: code,
+				folders: "",
+				files: "",
+				joined: false,
+			});
+			await this.savePluginData();
+			new Notice(`Created ${cleanName}. Add its folders and files, then copy the invite.`);
+			return true;
+		} catch (error) {
+			new Notice(error instanceof Error ? error.message : String(error));
+			return false;
+		}
+	}
+
+	async joinShare(invite: Invite): Promise<void> {
+		const existing = this.settings.shares.find(
+			(s) => s.webAppUrl === invite.url && s.shareCode === invite.shareCode,
+		);
+		if (existing) {
+			new Notice(`You've already joined ${existing.name}.`);
 			return;
 		}
+		const share: ShareConfig = {
+			id: newId(),
+			name: invite.name,
+			webAppUrl: invite.url,
+			shareCode: invite.shareCode,
+			folders: invite.scope.folders.join("\n"),
+			files: invite.scope.files.join("\n"),
+			joined: true,
+		};
+		this.settings.shares.push(share);
+		await this.savePluginData();
+		await this.syncNow(true, share.id);
+	}
+
+	/**
+	 * Removes a share from this vault. For a share in your own mailbox it is
+	 * also deleted there, so its code stops working for everyone. Shared
+	 * files stay in the vault either way.
+	 */
+	async removeShare(share: ShareConfig): Promise<void> {
+		if (this.isOwnedShare(share) && !share.joined) {
+			try {
+				await revokeShare(this.settings.mailboxUrl, this.settings.ownerCode, share.shareCode);
+			} catch (error) {
+				// Already gone from the mailbox is fine; anything else stops here.
+				const gone = error instanceof MailboxError && error.message.includes("doesn't know this code");
+				if (!gone) {
+					new Notice(error instanceof Error ? error.message : String(error));
+					return;
+				}
+			}
+		}
+		this.settings.shares = this.settings.shares.filter((s) => s.id !== share.id);
+		for (const perShare of Object.values(this.states)) {
+			delete perShare[share.id];
+		}
+		this.statuses.delete(share.id);
+		await this.savePluginData();
+		new Notice(`Removed ${share.name}. Its files stay in your vault.`);
+	}
+
+	async copyInvite(share: ShareConfig): Promise<void> {
 		const invite = encodeInvite({
-			url: this.settings.webAppUrl,
-			shareCode: this.settings.shareCode,
-			scope: this.scope(),
+			name: share.name,
+			url: share.webAppUrl,
+			shareCode: share.shareCode,
+			scope: this.scopeOf(share),
 		});
 		try {
 			await navigator.clipboard.writeText(invite);
-			new Notice("Invite copied. Send it privately.");
+			new Notice(`Invite for ${share.name} copied. Send it privately.`);
 		} catch {
 			new Notice("Couldn't copy to the clipboard.");
 		}
 	}
 
-	async saveSettings(change: SettingsChange): Promise<void> {
-		if (change.connectionChanged) {
-			// A different mailbox has its own history; start over against it.
-			this.state = emptyState();
-			this.states = {};
-		}
+	async saveSettings(change: SettingsChange = {}): Promise<void> {
 		await this.savePluginData();
 		if (change.intervalChanged) {
 			this.restartInterval();
 		}
+		if (change.scopeChanged) {
+			this.scheduleEditSync();
+		}
+	}
+
+	private stateFor(share: ShareConfig): SyncState {
+		const perShare = (this.states[this.deviceId] ??= {});
+		return (perShare[share.id] ??= emptyState());
 	}
 
 	private scheduleEditSync(): void {
@@ -212,21 +355,21 @@ export default class SharedFolderSyncPlugin extends Plugin {
 	}
 
 	private async loadPluginData(): Promise<void> {
-		const data = ((await this.loadData()) ?? {}) as Partial<PluginData>;
-		this.settings = { ...DEFAULT_SETTINGS, ...data.settings };
-		this.states = data.states ?? {};
+		const data = ((await this.loadData()) ?? {}) as Record<string, unknown>;
+		const migrated = migrateData(data);
+		this.settings = migrated.settings;
+		this.states = migrated.states;
+
 		const stored: unknown = this.app.loadLocalStorage(DEVICE_ID_KEY);
 		if (typeof stored === "string" && stored !== "") {
 			this.deviceId = stored;
 		} else {
-			this.deviceId = Math.random().toString(36).slice(2, 10);
+			this.deviceId = newId();
 			this.app.saveLocalStorage(DEVICE_ID_KEY, this.deviceId);
 		}
-		this.state = this.states[this.deviceId] ?? emptyState();
 	}
 
 	private async savePluginData(): Promise<void> {
-		this.states[this.deviceId] = this.state;
 		const data: PluginData = { settings: this.settings, states: this.states };
 		await this.saveData(data);
 	}

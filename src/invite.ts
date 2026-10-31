@@ -3,6 +3,7 @@ import { ShareScope } from "./scope";
 const PREFIX = "sfs1:";
 
 export interface Invite {
+	name: string;
 	url: string;
 	shareCode: string;
 	scope: ShareScope;
@@ -28,6 +29,7 @@ export function encodeInvite(invite: Invite): string {
 		PREFIX +
 		toBase64(
 			JSON.stringify({
+				n: invite.name,
 				u: invite.url,
 				k: invite.shareCode,
 				d: invite.scope.folders,
@@ -48,13 +50,14 @@ export function decodeInvite(text: string): Invite | null {
 		if (typeof data !== "object" || data === null) {
 			return null;
 		}
-		const { u, k, d, f } = data as Record<string, unknown>;
+		const { n, u, k, d, f } = data as Record<string, unknown>;
 		const isStringList = (v: unknown): v is string[] =>
 			Array.isArray(v) && v.every((x) => typeof x === "string");
 		if (typeof u !== "string" || typeof k !== "string" || !isStringList(d) || !isStringList(f)) {
 			return null;
 		}
-		return { url: u, shareCode: k, scope: { folders: d, files: f } };
+		const name = typeof n === "string" && n.trim() !== "" ? n.trim() : "Shared folder";
+		return { name, url: u, shareCode: k, scope: { folders: d, files: f } };
 	} catch {
 		return null;
 	}

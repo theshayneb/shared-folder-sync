@@ -22,6 +22,7 @@ describe("shared paths", () => {
 describe("invites", () => {
 	it("carries the mailbox and shared paths, including non-ASCII names", () => {
 		const invite = {
+			name: "Groceries",
 			url: "https://script.google.com/macros/s/abc/exec",
 			shareCode: "secret",
 			scope: { folders: ["Épicerie"], files: ["Utilities/Bases/ShoppingList.base"] },
@@ -32,5 +33,17 @@ describe("invites", () => {
 	it("rejects text that isn't an invite", () => {
 		expect(decodeInvite("hello")).toBeNull();
 		expect(decodeInvite("sfs1:not-base64!")).toBeNull();
+	});
+});
+
+describe("invites from version 0.1.0", () => {
+	it("still decode, with a default name", () => {
+		const old = "sfs1:" + btoa(JSON.stringify({ u: "https://x/exec", k: "c", d: ["A"], f: [] }));
+		expect(decodeInvite(old)).toEqual({
+			name: "Shared folder",
+			url: "https://x/exec",
+			shareCode: "c",
+			scope: { folders: ["A"], files: [] },
+		});
 	});
 });

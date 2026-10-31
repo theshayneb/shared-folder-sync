@@ -1,13 +1,19 @@
 # Shared Folder Sync
 
-Share one folder of your vault, plus single files such as a Base, with
-another person's Obsidian vault. Both of you can add, edit and delete notes,
-and the changes reach the other vault within seconds.
+Share folders of your vault, plus single files such as a Base, with other
+people's Obsidian vaults. Everyone in a share can add, edit and delete its
+notes, and the changes reach the other vaults within seconds.
+
+You can make as many **shares** as you like. Each share has its own folders,
+files and share code, so you can share your grocery list with your roommate
+and a different folder with someone else. A share code opens only its own
+share.
 
 Changes travel through a small Google Apps Script "mailbox" that you deploy
-under your own Google account. It stores the shared notes in one file in your
-Google Drive. The other person only needs the plugin and an invite. They
-don't need a Google login, and nothing else in either vault is sent.
+under your own Google account. Each share's notes are kept in their own file
+in your Google Drive. The people you share with only need the plugin and an
+invite. They don't need a Google login, and nothing outside the share is
+sent.
 
 Works on desktop, Android and iPhone.
 
@@ -19,25 +25,26 @@ Works on desktop, Android and iPhone.
 - **When it syncs:** a few seconds after you edit a shared file, every 30
   seconds while Obsidian is open (you can change this), and when you switch
   back to Obsidian on a phone.
-- **Same paths in both vaults:** files land at the same paths in the other
-  vault, for example `Reference/Grocery Items/Milk.md`. Folders are created
+- **Same paths in every vault:** files land at the same paths in the other
+  vaults, for example `Reference/Grocery Items/Milk.md`. Folders are created
   if they're missing.
 - **Both editing the same note:** the later edit wins and the earlier one
   is replaced. Edits to different notes never conflict.
-- **Deletes:** deleting a shared note deletes it for the other person too. It
+- **Deletes:** deleting a shared note deletes it for everyone in the share. It
   goes to Obsidian's trash on their side, so it can be recovered.
 
-## Setup, part 1: the mailbox (owner, once)
+## Setup, part 1: the mailbox (once)
 
 1. Go to [script.google.com](https://script.google.com) and click
-   **New project**. Name it something like *Grocery mailbox*.
+   **New project**. Name it something like *Obsidian mailbox*.
 2. Delete the sample code in `Code.gs` and paste in all of
    [`apps-script/Code.gs`](apps-script/Code.gs). Click **Save**.
 3. In the function menu at the top, pick **setup** and click **Run**. Google
    asks for permission to use your Drive. Because this is your own script,
    Google shows an "unverified app" screen: click **Advanced**, then
-   **Go to Grocery mailbox**, then **Allow**.
-4. Open **Execution log** and copy the **Share code** it printed.
+   **Go to Obsidian mailbox**, then **Allow**.
+4. Open **Execution log** and copy the **Owner code** it printed. Keep it to
+   yourself: it can create and delete shares.
 5. Click **Deploy → New deployment**. Click the gear and pick **Web app**.
    Set **Execute as: Me** and **Who has access: Anyone**, then click
    **Deploy**. Copy the **Web app URL** (it ends in `/exec`).
@@ -45,29 +52,51 @@ Works on desktop, Android and iPhone.
    `{"ok":true,"service":"shared-folder-sync"}`.
 
 "Anyone" means anyone with the URL can reach the script, but the script
-refuses every request that doesn't carry the share code. To change the code,
-run `resetShareCode` from the editor and send a new invite.
+refuses every request that doesn't carry a valid code.
 
 ## Setup, part 2: your vault
 
 1. Install the plugin through [BRAT](https://github.com/TfTHacker/obsidian42-brat)
    (**Add beta plugin** with `theshayneb/shared-obs-folder`) and enable it.
-2. Open **Settings → Shared Folder Sync** and fill in:
-   - **Web app URL** and **Share code** from part 1. Click **Test**.
+2. Open **Settings → Shared Folder Sync**. Under **Your mailbox**, enter the
+   **Web app URL** and **Owner code** from part 1 and click **Test**.
+
+## Setup, part 3: make a share
+
+Do this once per person, or per group, you want to share with.
+
+1. Under **New share**, type a name (for example *Groceries*) and click
+   **Create**.
+2. In the new share, fill in its paths, one per line, from the vault root:
    - **Folders**: `Reference/Grocery Items`
    - **Single files**: `Utilities/Bases/ShoppingList.base`
-3. Click **Sync now**. The first sync uploads every shared note.
-4. Click **Copy invite** and send the invite to the other person through a
-   private channel, such as a direct message. Anyone with the invite can edit
-   the shared notes.
+3. Click **Sync now**. The first sync uploads the share's notes.
+4. Click **Copy invite** and send the invite to that person privately, such
+   as in a direct message. Anyone with the invite can edit that share's
+   notes, and nothing else.
 
-## Setup, part 3: the other person's vault
+A file or folder can be in more than one share. Edits from any of them reach
+everyone in each share that holds it.
+
+## Setup, part 4: the other person's vault
 
 1. Install BRAT and this plugin the same way, and enable it.
 2. Open **Settings → Shared Folder Sync**, paste the invite into
    **Join with an invite** and click **Join**.
 
-The shared folder and Base appear at the same paths as in your vault.
+The share's folders and files appear at the same paths as in your vault. If
+you later change a share's folders or files, everyone who joined it follows
+along on their next sync. Someone can join several shares, from you or from
+other people, by joining each invite.
+
+## Removing a share
+
+- **Delete share** (on a share you created) deletes it from your mailbox. Its
+  code stops working for everyone, and its data file in your Drive goes to
+  the trash.
+- **Leave** (on a share you joined) stops syncing it on this device.
+
+Either way, the files already in each vault stay where they are.
 
 ## Tips for a grocery list
 
@@ -76,14 +105,23 @@ The shared folder and Base appear at the same paths as in your vault.
 - To add an item, create a note in `Reference/Grocery Items` with the usual
   properties. A template with `Type`, `Location`, `In_Stock: false` and the
   `grocery` tag makes this quick.
-- The command palette has **Sync now** and **Copy invite for the other
-  person**, and there's a sync button in the ribbon.
+- The command palette has **Sync all shares now** and **Copy invite for a
+  share**, and there's a sync button in the ribbon.
 
 ## Updating the mailbox script
 
 If `Code.gs` changes in a later version, paste the new code, then use
 **Deploy → Manage deployments → Edit (pencil) → Version: New version →
 Deploy**. That keeps the same URL, so nobody needs a new invite.
+
+**Coming from 0.1.0?** After pasting the new code, run **setup** once more to
+get your owner code, then redeploy as above. Your existing share code keeps
+working: it becomes a share named *Shared folder* in your settings, and your
+roommate doesn't need to do anything. Enter the URL and owner code under
+**Your mailbox** to manage it like any other share.
+
+If the owner code leaks, run `resetOwnerCode` from the editor. Share codes
+keep working. To cut off a share code, delete that share.
 
 ## Limits
 

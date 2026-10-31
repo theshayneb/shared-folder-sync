@@ -1,4 +1,4 @@
-import { inScope, ShareScope } from "./scope";
+import { inScope, ShareScope, scopeKey } from "./scope";
 
 export interface LocalFile {
 	path: string;
@@ -37,6 +37,9 @@ export interface SyncRequest {
 	cursor: number;
 	device: string;
 	changes: PushChange[];
+	/** Sent by the share's owner so other members adopt these paths. */
+	scope?: ShareScope;
+	ownerKey?: string;
 }
 
 export interface PushResult {
@@ -50,6 +53,8 @@ export interface SyncResponse {
 	rev: number;
 	results: PushResult[];
 	changes: RemoteEntry[];
+	/** The share's paths as last set by its owner, or null if never set. */
+	scope: ShareScope | null;
 }
 
 export type Transport = (request: SyncRequest) => Promise<SyncResponse>;
@@ -65,11 +70,15 @@ export interface FileRecord {
 export interface SyncState {
 	cursor: number;
 	files: Record<string, FileRecord>;
+	/** The shared paths at the last pass. */
+	scopeKey?: string;
 }
 
 export interface SyncSummary {
 	pushed: number;
 	pulled: number;
+	/** The share's paths according to the mailbox, from the last response. */
+	remoteScope: ShareScope | null;
 }
 
 const DELETED = "";
@@ -99,6 +108,8 @@ export interface SyncEngineOptions {
 	scope: ShareScope;
 	device: string;
 	state: SyncState;
+	/** The owner code, when this device owns the share and sets its paths. */
+	ownerKey?: string;
 	/** Called after every round trip so progress survives a crash. */
 	saveState: (state: SyncState) => Promise<void>;
 	now?: () => number;
@@ -112,7 +123,15 @@ export interface SyncEngineOptions {
 export async function runSync(opts: SyncEngineOptions): Promise<SyncSummary> {
 	const { store, transport, scope, device, state } = opts;
 	const now = opts.now ?? (() => Date.now());
-	const summary: SyncSummary = { pushed: 0, pulled: 0 };
+	const summary: SyncSummary = { pushed: 0, pulled: 0, remoteScope: null };
+
+	// Files newly in scope may have arrived earlier and been skipped, so
+	// fetch everything again. Files already in step are skipped cheaply.
+	const key = scopeKey(scope);
+	if (state.scopeKey !== key) {
+		state.cursor = 0;
+		state.scopeKey = key;
+	}
 
 	const changes: PushChange[] = [];
 	const present = new Set<string>();
@@ -147,7 +166,13 @@ export async function runSync(opts: SyncEngineOptions): Promise<SyncSummary> {
 	do {
 		const batch = changes.slice(offset, offset + BATCH_SIZE);
 		offset += BATCH_SIZE;
-		const response = await transport({ action: "sync", cursor: state.cursor, device, changes: batch });
+		const request: SyncRequest = { action: "sync", cursor: state.cursor, device, changes: batch };
+		if (opts.ownerKey) {
+			request.scope = scope;
+			request.ownerKey = opts.ownerKey;
+		}
+		const response = await transport(request);
+		summary.remoteScope = response.scope ?? null;
 
 		for (const result of response.results) {
 			const pushed = batch.find((c) => c.path === result.path);

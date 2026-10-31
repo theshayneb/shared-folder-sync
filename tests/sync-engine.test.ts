@@ -51,6 +51,8 @@ class MemoryVault implements LocalStore {
 class Device {
 	vault = new MemoryVault();
 	state: SyncState = emptyState();
+	scope: ShareScope = SCOPE;
+	ownerKey: string | undefined;
 	constructor(
 		private readonly transport: Transport,
 		private readonly name: string,
@@ -59,9 +61,10 @@ class Device {
 		return runSync({
 			store: this.vault,
 			transport: this.transport,
-			scope: SCOPE,
+			scope: this.scope,
 			device: this.name,
 			state: this.state,
+			ownerKey: this.ownerKey,
 			saveState: () => Promise.resolve(),
 			now: tick,
 		});
@@ -71,7 +74,8 @@ class Device {
 function setupPair() {
 	const mailbox = createMailbox();
 	mailbox.runSetup();
-	return { mailbox, me: new Device(mailbox.transport, "me"), roommate: new Device(mailbox.transport, "roommate") };
+	const transport = mailbox.transportFor(mailbox.createShare("Groceries"));
+	return { mailbox, transport, me: new Device(transport, "me"), roommate: new Device(transport, "roommate") };
 }
 
 describe("sharing a grocery folder between two vaults", () => {
@@ -81,8 +85,8 @@ describe("sharing a grocery folder between two vaults", () => {
 		me.vault.set(BASE, "views:\n  - type: table\n");
 		me.vault.set("Journal/Private.md", "not shared");
 
-		expect(await me.sync()).toEqual({ pushed: 2, pulled: 0 });
-		expect(await roommate.sync()).toEqual({ pushed: 0, pulled: 2 });
+		expect(await me.sync()).toMatchObject({ pushed: 2, pulled: 0 });
+		expect(await roommate.sync()).toMatchObject({ pushed: 0, pulled: 2 });
 
 		expect(roommate.vault.get(MILK)).toBe(note(false));
 		expect(roommate.vault.get(BASE)).toBe("views:\n  - type: table\n");
@@ -115,7 +119,7 @@ describe("sharing a grocery folder between two vaults", () => {
 		await me.sync();
 
 		expect(me.vault.get(MILK)).toBeNull();
-		expect(await me.sync()).toEqual({ pushed: 0, pulled: 0 });
+		expect(await me.sync()).toMatchObject({ pushed: 0, pulled: 0 });
 	});
 
 	it("keeps the later edit when both people change the same item", async () => {
@@ -140,8 +144,8 @@ describe("sharing a grocery folder between two vaults", () => {
 		await me.sync();
 		await roommate.sync();
 
-		expect(await me.sync()).toEqual({ pushed: 0, pulled: 0 });
-		expect(await roommate.sync()).toEqual({ pushed: 0, pulled: 0 });
+		expect(await me.sync()).toMatchObject({ pushed: 0, pulled: 0 });
+		expect(await roommate.sync()).toMatchObject({ pushed: 0, pulled: 0 });
 	});
 
 	it("doesn't overwrite an edit made while a sync is writing files", async () => {
@@ -168,8 +172,8 @@ describe("sharing a grocery folder between two vaults", () => {
 	});
 
 	it("ignores files the mailbox holds outside the shared paths", async () => {
-		const { mailbox, roommate } = setupPair();
-		await mailbox.transport({
+		const { transport, roommate } = setupPair();
+		await transport({
 			action: "sync",
 			cursor: 0,
 			device: "other",
@@ -186,5 +190,55 @@ describe("sharing a grocery folder between two vaults", () => {
 		}
 		expect((await me.sync()).pushed).toBe(120);
 		expect((await roommate.sync()).pulled).toBe(120);
+	});
+
+	it("tells members the paths the owner set", async () => {
+		const { mailbox, me, roommate } = setupPair();
+		me.ownerKey = mailbox.ownerCode();
+		await me.sync();
+		roommate.scope = { folders: [], files: [] };
+		expect((await roommate.sync()).remoteScope).toEqual(SCOPE);
+	});
+
+	it("brings in files that were skipped before their path was shared", async () => {
+		const { me, roommate } = setupPair();
+		me.vault.set(MILK, note(false));
+		me.vault.set(BASE, "v1");
+		roommate.scope = { folders: [], files: [BASE] };
+		await me.sync();
+		await roommate.sync();
+		expect(roommate.vault.get(MILK)).toBeNull();
+
+		roommate.scope = SCOPE;
+		await roommate.sync();
+		expect(roommate.vault.get(MILK)).toBe(note(false));
+	});
+
+	it("keeps two shares in the same vault apart", async () => {
+		const mailbox = createMailbox();
+		mailbox.runSetup();
+		const groceries = mailbox.transportFor(mailbox.createShare("Groceries"));
+		const chores = mailbox.transportFor(mailbox.createShare("Chores"));
+		const choresScope = { folders: ["Chores"], files: [] };
+
+		const me = new Device(groceries, "me");
+		const meChores = new Device(chores, "me");
+		meChores.vault = me.vault;
+		meChores.scope = choresScope;
+		me.vault.set(MILK, note(false));
+		me.vault.set("Chores/Dishes.md", "weekly");
+		await me.sync();
+		await meChores.sync();
+
+		const roommate = new Device(groceries, "roommate");
+		await roommate.sync();
+		expect(roommate.vault.get(MILK)).toBe(note(false));
+		expect(roommate.vault.get("Chores/Dishes.md")).toBeNull();
+
+		const sibling = new Device(chores, "sibling");
+		sibling.scope = choresScope;
+		await sibling.sync();
+		expect(sibling.vault.get("Chores/Dishes.md")).toBe("weekly");
+		expect(sibling.vault.get(MILK)).toBeNull();
 	});
 });

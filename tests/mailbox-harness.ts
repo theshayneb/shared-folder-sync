@@ -7,10 +7,16 @@ const CODE = readFileSync(new URL("../apps-script/Code.gs", import.meta.url), "u
 export interface FakeMailbox {
 	/** Calls the deployed script's doPost the way a web request would. */
 	post(body: object): Record<string, unknown>;
-	/** Transport for the sync engine, wired straight to doPost. */
-	transport: Transport;
-	/** The JSON the script keeps in Drive. */
-	storedText(): string;
+	/** Transport for the sync engine on one share, wired straight to doPost. */
+	transportFor(shareCode: string): Transport;
+	/** Creates a share with the owner code and returns its share code. */
+	createShare(name: string): string;
+	ownerCode(): string;
+	/** Script properties, to inspect or to fake an older version's data. */
+	props: Map<string, string>;
+	/** The Drive files the script keeps, by id. */
+	files: Map<string, string>;
+	trashed: Set<string>;
 	logs: string[];
 	runSetup(): void;
 }
@@ -19,14 +25,17 @@ export interface FakeMailbox {
 export function createMailbox(): FakeMailbox {
 	const props = new Map<string, string>();
 	const files = new Map<string, string>();
+	const trashed = new Set<string>();
 	const logs: string[] = [];
 	let nextId = 1;
+	let nextUuid = 1;
 
 	const fileHandle = (id: string) => ({
 		getId: () => id,
 		getName: () => "shared-folder-sync-store.json",
 		getBlob: () => ({ getDataAsString: () => files.get(id) ?? "" }),
 		setContent: (text: string) => files.set(id, text),
+		setTrashed: (value: boolean) => (value ? trashed.add(id) : trashed.delete(id)),
 	});
 
 	const sandbox = {
@@ -35,6 +44,7 @@ export function createMailbox(): FakeMailbox {
 				getProperty: (k: string) => props.get(k) ?? null,
 				setProperty: (k: string, v: string) => props.set(k, v),
 				deleteProperty: (k: string) => props.delete(k),
+				getProperties: () => Object.fromEntries(props),
 			}),
 		},
 		DriveApp: {
@@ -50,7 +60,7 @@ export function createMailbox(): FakeMailbox {
 		},
 		MimeType: { PLAIN_TEXT: "text/plain" },
 		LockService: { getScriptLock: () => ({ tryLock: () => true, releaseLock: () => undefined }) },
-		Utilities: { getUuid: () => "1234-5678-abcd" },
+		Utilities: { getUuid: () => `uuid-${nextUuid++}` },
 		Logger: { log: (m: string) => logs.push(m) },
 		ContentService: {
 			MimeType: { JSON: "application/json" },
@@ -67,13 +77,23 @@ export function createMailbox(): FakeMailbox {
 	const post = (body: object) =>
 		JSON.parse(g.doPost({ postData: { contents: JSON.stringify(body) } }).text) as Record<string, unknown>;
 
+	const ownerCode = () => props.get("OWNER_CODE") ?? "";
+
 	return {
 		post,
 		logs,
+		props,
+		files,
+		trashed,
+		ownerCode,
 		runSetup: () => g.setup(),
-		storedText: () => [...files.values()][0] ?? "",
-		transport: (request: SyncRequest) => {
-			const data = post({ ...request, key: props.get("SHARE_CODE") });
+		createShare: (name: string) => {
+			const data = post({ key: ownerCode(), action: "create-share", name });
+			if (typeof data.code !== "string") throw new Error(String(data.error));
+			return data.code;
+		},
+		transportFor: (shareCode: string) => (request: SyncRequest) => {
+			const data = post({ ...request, key: shareCode });
 			if (data.ok !== true) throw new Error(String(data.error));
 			return Promise.resolve(data as unknown as SyncResponse);
 		},

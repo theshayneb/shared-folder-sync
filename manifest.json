@@ -1,7 +1,7 @@
 {
   "id": "shared-folder-sync",
   "name": "Shared Folder Sync",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "minAppVersion": "1.9.0",
   "description": "Share one folder and a Base with another person's vault through a Google Apps Script mailbox.",
   "author": "theshayneb",

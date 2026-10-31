@@ -2,8 +2,9 @@ import { requestUrl, RequestUrlResponse } from "obsidian";
 import { SyncRequest, SyncResponse } from "./sync-engine";
 
 const ERROR_MESSAGES: Record<string, string> = {
-	"bad-share-code": "The share code doesn't match the mailbox. Check it in settings.",
+	"bad-share-code": "The mailbox doesn't know this code. The share may have been deleted.",
 	"not-set-up": "The mailbox script hasn't been set up. Run the setup function in Apps Script once.",
+	"server-error": "The mailbox script hit an error. Try again in a minute.",
 	busy: "The mailbox is busy. It will try again shortly.",
 	"bad-request": "The mailbox didn't understand the request.",
 };
@@ -29,10 +30,10 @@ async function post(url: string, body: string): Promise<RequestUrlResponse> {
 	return response;
 }
 
-async function call(url: string, shareCode: string, payload: object): Promise<Record<string, unknown>> {
+async function call(url: string, key: string, payload: object): Promise<Record<string, unknown>> {
 	let response: RequestUrlResponse;
 	try {
-		response = await post(url, JSON.stringify({ ...payload, key: shareCode }));
+		response = await post(url, JSON.stringify({ ...payload, key }));
 	} catch (error) {
 		throw new MailboxError(`Couldn't reach the mailbox (${error instanceof Error ? error.message : String(error)}).`);
 	}
@@ -68,6 +69,22 @@ export function createTransport(url: string, shareCode: string) {
 	};
 }
 
-export async function pingMailbox(url: string, shareCode: string): Promise<void> {
-	await call(url, shareCode, { action: "ping" });
+/** Checks a share code, or the owner code. */
+export async function pingMailbox(url: string, key: string): Promise<{ owner: boolean }> {
+	const data = await call(url, key, { action: "ping" });
+	return { owner: data.owner === true };
+}
+
+/** Creates a share in your mailbox and returns its new share code. */
+export async function createShare(url: string, ownerCode: string, name: string): Promise<string> {
+	const data = await call(url, ownerCode, { action: "create-share", name });
+	if (typeof data.code !== "string") {
+		throw new MailboxError("The mailbox sent an unexpected answer.");
+	}
+	return data.code;
+}
+
+/** Deletes a share from your mailbox; its code stops working for everyone. */
+export async function revokeShare(url: string, ownerCode: string, shareCode: string): Promise<void> {
+	await call(url, ownerCode, { action: "revoke-share", code: shareCode });
 }
