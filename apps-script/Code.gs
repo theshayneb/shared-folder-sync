@@ -13,6 +13,8 @@
  */
 
 var SHARE_PREFIX = 'share:';
+/** Sync protocol this script speaks. Plugins from 0.3.0 refuse older scripts. */
+var PROTOCOL = 3;
 var MAX_PATH_LENGTH = 400;
 var MAX_NAME_LENGTH = 100;
 
@@ -37,7 +39,7 @@ function resetOwnerCode() {
 
 /** Opening the web app URL in a browser shows this, which confirms the deploy. */
 function doGet() {
-  return json_({ ok: true, service: 'shared-folder-sync' });
+  return json_({ ok: true, service: 'shared-folder-sync', v: PROTOCOL });
 }
 
 function doPost(e) {
@@ -59,7 +61,7 @@ function doPost(e) {
     if (body.key === owner) return json_(handleOwner_(props, body));
     var share = readShare_(props, body.key);
     if (!share) return json_({ ok: false, error: 'bad-share-code' });
-    if (body.action === 'ping') return json_({ ok: true, name: share.name });
+    if (body.action === 'ping') return json_({ ok: true, name: share.name, v: PROTOCOL });
     if (body.action !== 'sync') return json_({ ok: false, error: 'bad-request' });
 
     var file = DriveApp.getFileById(share.fileId);
@@ -77,7 +79,7 @@ function doPost(e) {
 
 /** Actions only the owner code may run. */
 function handleOwner_(props, body) {
-  if (body.action === 'ping') return { ok: true, owner: true };
+  if (body.action === 'ping') return { ok: true, owner: true, v: PROTOCOL };
 
   if (body.action === 'create-share') {
     var name = cleanName_(body.name) || 'Shared folder';
@@ -122,9 +124,11 @@ function handleOwner_(props, body) {
  * Applies one client's pushed changes to `state` and returns everything that
  * changed after the client's cursor. Pure apart from mutating `state`.
  *
- * A change loses only when someone else changed the same file after the
- * client last saw it AND that other change is newer (by file mtime). The
- * loser gets the winning version back in `current`.
+ * When someone else changed the same file after the client last saw it
+ * (`baseRev`), the change is rejected and the current version comes back in
+ * `current`. Plugins from 0.3.0 send `v: 3` and merge the two versions
+ * themselves, then push the result. Older plugins don't send `v`; for them a
+ * change still wins when its file mtime is newer, as before.
  *
  * When `canSetScope` is true (the request carried the owner code), the
  * request's `scope` becomes the share's folder and file list, which every
@@ -161,7 +165,8 @@ function handleSync_(state, body, canSetScope) {
       results.push({ path: change.path, status: 'accepted', rev: existing.rev });
       continue;
     }
-    if (existing && existing.rev > baseRev && existing.mtime > mtime) {
+    var stale = existing && existing.rev > baseRev;
+    if (stale && (body.v >= 3 || existing.mtime > mtime)) {
       results.push({ path: change.path, status: 'rejected', rev: existing.rev, current: toEntry_(change.path, existing) });
       continue;
     }
@@ -182,7 +187,7 @@ function handleSync_(state, body, canSetScope) {
 
   return {
     dirty: dirty,
-    response: { ok: true, rev: state.rev, results: results, changes: out, scope: state.scope || null },
+    response: { ok: true, v: PROTOCOL, rev: state.rev, results: results, changes: out, scope: state.scope || null },
   };
 }
 

@@ -2,7 +2,7 @@
 
 Share folders of your vault, plus single files such as a Base, with other
 people's Obsidian vaults. Everyone in a share can add, edit and delete its
-notes, and the changes reach the other vaults within seconds.
+notes, and the changes reach the other vaults within a minute or two.
 
 You can make as many **shares** as you like. Each share has its own folders,
 files and share code, so you can share your grocery list with your roommate
@@ -22,16 +22,58 @@ Works on desktop, Android and iPhone.
 - **What's shared:** `.md`, `.base`, `.canvas` and `.txt` files inside the
   shared folders, plus any single files you list. Images and other
   attachments are not shared.
-- **When it syncs:** a few seconds after you edit a shared file, every 30
-  seconds while Obsidian is open (you can change this), and when you switch
-  back to Obsidian on a phone.
 - **Same paths in every vault:** files land at the same paths in the other
   vaults, for example `Reference/Grocery Items/Milk.md`. Folders are created
   if they're missing.
-- **Both editing the same note:** the later edit wins and the earlier one
-  is replaced. Edits to different notes never conflict.
+- **Both editing the same note:** the edits are merged. In a note's
+  properties, each property merges on its own, so one person ticking
+  `In_Stock` and another changing `Location` both survive. The note's text
+  merges line by line. Only when both change the same property or line does
+  one edit win: the one with the newer file modified time.
 - **Deletes:** deleting a shared note deletes it for everyone in the share. It
-  goes to Obsidian's trash on their side, so it can be recovered.
+  goes to Obsidian's trash on their side, so it can be recovered. If one
+  person deletes a note while another edits it, the edit wins.
+- **Conflict copies:** if Obsidian Sync makes a `(Conflicted copy …)` file
+  inside a shared folder, it stays in your vault and isn't shared.
+
+## Your devices: one always-on device does the syncing
+
+If you use Obsidian Sync across several devices, only **one** of them should
+talk to the mailbox: the one that's on the most, usually a desktop. Your other
+devices get shared notes from it through Obsidian Sync, and their edits reach
+it the same way.
+
+This is the **Run background tasks on this device** switch at the top of the
+plugin's settings. It's saved on each device separately and is never synced.
+It starts **on** for desktops and **off** for phones and tablets. A phone or
+tablet where Obsidian Sync is off starts with it on, since nothing else would
+bring changes there.
+
+With background tasks on, the device:
+
+- checks the mailbox every 30 seconds (you can change this);
+- sends your edits shortly after you make them;
+- waits for Obsidian Sync to finish before doing either, after Obsidian
+  starts or wakes from sleep, and while other devices' changes are still
+  arriving. When Obsidian Sync reports it's idle, that's about 30 seconds
+  after starting and 15 seconds after the last file change; when it can't
+  tell, 3 minutes and 1 minute.
+
+The status bar shows how many of your changes are still waiting to be sent.
+**Send changes now** (in each share's settings, the command palette and the
+ribbon) skips the wait. Use it before closing Obsidian if something is still
+waiting.
+
+With background tasks off, the device never talks to the mailbox on its own
+and has no Send changes now button. You can still create, join and delete
+shares there.
+
+**Example:** you tick *Milk* on your phone in the shop. Obsidian Sync carries
+the note to your desktop. Once Obsidian Sync has settled there, your desktop
+sends it to the mailbox. Your roommate's desktop picks it up on its next
+check, and their Obsidian Sync carries it to their phone. That takes a couple
+of minutes, and both desktops need Obsidian open. If your roommate's desktop
+is closed, the change waits in the mailbox until it's open again.
 
 ## Setup, part 1: the mailbox (once)
 
@@ -105,8 +147,8 @@ Either way, the files already in each vault stay where they are.
 - To add an item, create a note in `Reference/Grocery Items` with the usual
   properties. A template with `Type`, `Location`, `In_Stock: false` and the
   `grocery` tag makes this quick.
-- The command palette has **Sync all shares now** and **Copy invite for a
-  share**, and there's a sync button in the ribbon.
+- The command palette has **Send changes now** and **Copy invite for a
+  share**, and there's a send button in the ribbon.
 
 ## Updating the mailbox script
 
@@ -120,15 +162,34 @@ working: it becomes a share named *Shared folder* in your settings, and your
 roommate doesn't need to do anything. Enter the URL and owner code under
 **Your mailbox** to manage it like any other share.
 
+**Coming from 0.2.0?** Update in this order:
+
+1. Paste the new `Code.gs` and deploy a new version, as above. Version 0.3.0
+   of the plugin refuses to sync with an older script, because the older
+   script settles clashing edits by file time, which can lose edits. The new
+   script still works with 0.2.0 plugins in the meantime.
+2. Update the plugin on **every one of your devices**. Until a device updates,
+   its old version keeps checking the mailbox and rewriting the plugin's
+   settings file every 30 seconds, which is what made your devices fight.
+   Your always-on device merges around it without losing anything, but the
+   churn only stops once that device updates.
+3. The people you share with can update when convenient.
+
+Your shares and settings carry over. Each device's sync progress moves out of
+the shared settings file into that device's own storage the first time it
+syncs.
+
 If the owner code leaks, run `resetOwnerCode` from the editor. Share codes
 keep working. To cut off a share code, delete that share.
 
 ## Limits
 
-- Changes arrive within seconds. Edits don't appear live, keystroke by
-  keystroke, the way a shared Google Doc does.
-- Google limits how much Apps Script can run each day on a free account. A
-  few devices checking every 30 seconds stays well within that. If syncs
+- Changes take a minute or two, longer when they travel through Obsidian
+  Sync first. Edits don't appear live, keystroke by keystroke, the way a
+  shared Google Doc does.
+- Google limits how much Apps Script can run each day on a free account. One
+  always-on device per person checking every 30 seconds stays well within
+  that. If syncs
   start failing late in the day, raise the interval in settings.
 - Deleted notes are remembered in the mailbox as tombstones. For a grocery
   list the mailbox file stays small.

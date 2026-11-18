@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { ShareScope } from "../src/scope";
-import { emptyState, LocalStore, runSync, SyncState, Transport } from "../src/sync-engine";
+import { emptyState, LocalStore, runSync, scanLocal, SyncState, Transport } from "../src/sync-engine";
 import { createMailbox } from "./mailbox-harness";
 
 const SCOPE: ShareScope = {
@@ -175,6 +175,7 @@ describe("sharing a grocery folder between two vaults", () => {
 		const { transport, roommate } = setupPair();
 		await transport({
 			action: "sync",
+			v: 3,
 			cursor: 0,
 			device: "other",
 			changes: [{ path: "Journal/Planted.md", content: "x", baseRev: 0, mtime: 1 }],
@@ -240,5 +241,58 @@ describe("sharing a grocery folder between two vaults", () => {
 		await sibling.sync();
 		expect(sibling.vault.get("Chores/Dishes.md")).toBe("weekly");
 		expect(sibling.vault.get(MILK)).toBeNull();
+	});
+
+	it("changes nothing in its saved progress when nothing changed", async () => {
+		const { me, roommate } = setupPair();
+		me.vault.set(MILK, note(false));
+		await me.sync();
+		await roommate.sync();
+		await roommate.sync();
+
+		const before = JSON.stringify(roommate.state);
+		await roommate.sync();
+		expect(JSON.stringify(roommate.state)).toBe(before);
+	});
+
+	it("keeps an old edit carried in late and a newer edit to another property of the same note", async () => {
+		const { me, roommate } = setupPair();
+		const item = (inStock: boolean, location: string) =>
+			`---\nType: Household\nLocation: ${location}\nIn_Stock: ${inStock}\ntags:\n  - grocery\n---\n`;
+		me.vault.set(MILK, item(true, "Dairy"));
+		await me.sync();
+		await roommate.sync();
+
+		// My tablet unticked milk days ago; Obsidian Sync only now brings it
+		// to my desktop. Meanwhile my roommate moved it to another aisle.
+		const tabletEdit = tick() - 1_000_000;
+		roommate.vault.set(MILK, item(true, "Aisle 7"));
+		await roommate.sync();
+		me.vault.files.set(MILK, { content: item(false, "Dairy"), mtime: tabletEdit });
+		await me.sync();
+		await roommate.sync();
+
+		expect(me.vault.get(MILK)).toBe(item(false, "Aisle 7"));
+		expect(roommate.vault.get(MILK)).toBe(item(false, "Aisle 7"));
+	});
+
+	it("never shares Obsidian Sync's conflict copies", async () => {
+		const { me, roommate } = setupPair();
+		me.vault.set("Reference/Grocery Items/Milk (Conflicted copy Pixel 202611181430).md", "copy");
+		me.vault.set(MILK, note(false));
+		expect(await me.sync()).toMatchObject({ pushed: 1 });
+		await roommate.sync();
+		expect([...roommate.vault.files.keys()]).toEqual([MILK]);
+	});
+
+	it("counts waiting changes without touching the saved progress", async () => {
+		const { me } = setupPair();
+		me.vault.set(MILK, note(false));
+		await me.sync();
+		me.vault.set(MILK, note(true));
+		me.vault.set(BASE, "new");
+		const before = JSON.stringify(me.state);
+		expect((await scanLocal(me.vault, SCOPE, me.state)).changes.map((c) => c.path).sort()).toEqual([MILK, BASE].sort());
+		expect(JSON.stringify(me.state)).toBe(before);
 	});
 });

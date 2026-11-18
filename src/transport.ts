@@ -11,6 +11,9 @@ const ERROR_MESSAGES: Record<string, string> = {
 
 export class MailboxError extends Error {}
 
+/** The sync protocol this plugin needs from the mailbox script. */
+const PROTOCOL = 3;
+
 async function post(url: string, body: string): Promise<RequestUrlResponse> {
 	const response = await requestUrl({
 		url,
@@ -55,6 +58,12 @@ async function call(url: string, key: string, payload: object): Promise<Record<s
 	if (record.ok !== true) {
 		const code = typeof record.error === "string" ? record.error : "unknown";
 		throw new MailboxError(ERROR_MESSAGES[code] ?? `The mailbox reported an error: ${code}.`);
+	}
+	// Older scripts settle conflicts by file time, which can lose edits.
+	if (record.v !== PROTOCOL) {
+		throw new MailboxError(
+			"The mailbox script is out of date. Paste the new Code.gs into Apps Script and deploy a new version.",
+		);
 	}
 	return record;
 }

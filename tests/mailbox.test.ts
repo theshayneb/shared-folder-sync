@@ -15,7 +15,7 @@ describe("mailbox script", () => {
 		mailbox.runSetup();
 		const owner = mailbox.ownerCode();
 		expect(mailbox.logs[0]).toBe(`Owner code: ${owner}`);
-		expect(mailbox.post({ key: owner, action: "ping" })).toEqual({ ok: true, owner: true });
+		expect(mailbox.post({ key: owner, action: "ping" })).toEqual({ ok: true, owner: true, v: 3 });
 		expect(mailbox.post({ key: "wrong", action: "ping" })).toEqual({ ok: false, error: "bad-share-code" });
 	});
 
@@ -24,7 +24,7 @@ describe("mailbox script", () => {
 		const groceries = mailbox.createShare("Groceries");
 		const chores = mailbox.createShare("Chores");
 		expect(groceries).not.toBe(chores);
-		expect(mailbox.post({ key: groceries, action: "ping" })).toEqual({ ok: true, name: "Groceries" });
+		expect(mailbox.post({ key: groceries, action: "ping" })).toEqual({ ok: true, name: "Groceries", v: 3 });
 
 		mailbox.post({
 			key: groceries,
@@ -77,7 +77,22 @@ describe("mailbox script", () => {
 		expect(mailbox.post({ key: code, action: "sync", cursor: 0, changes: [] }).scope).toEqual(scope);
 	});
 
-	it("keeps the newer of two edits made from the same starting point", () => {
+	it("turns down any change made over someone else's newer one, so the plugin can merge", () => {
+		const mailbox = setUp();
+		const key = mailbox.createShare("Groceries");
+		const push = (content: string, baseRev: number, mtime: number) =>
+			mailbox.post({ key, action: "sync", v: 3, cursor: 0, changes: [{ path: "a.md", content, baseRev, mtime }] });
+
+		push("v1", 0, 100);
+		push("roommate edit", 1, 300);
+		// The file time says newer, but it started from rev 1: still turned down.
+		const late = push("tablet copy", 1, 999) as { results: Array<Record<string, unknown>> };
+		expect(late.results[0]).toMatchObject({ status: "rejected", rev: 2, current: { content: "roommate edit" } });
+		const merged = push("merged", 2, 400) as { results: Array<Record<string, unknown>> };
+		expect(merged.results[0]).toMatchObject({ status: "accepted", rev: 3 });
+	});
+
+	it("still decides by file time for 0.2.0 plugins, which can't merge", () => {
 		const mailbox = setUp();
 		const key = mailbox.createShare("Groceries");
 		const push = (content: string, baseRev: number, mtime: number) =>

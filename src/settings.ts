@@ -34,10 +34,39 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 		super(app, plugin);
 	}
 
-	display(): void {
+	/**
+	 * Redraws after another device's settings arrived, unless you're typing
+	 * in one of the fields, which a redraw would interrupt.
+	 */
+	refresh(): void {
 		const { containerEl } = this;
-		const settings = this.plugin.settings;
+		if (!containerEl.isConnected) {
+			return;
+		}
+		const focused = activeDocument.activeElement;
+		if (focused && containerEl.contains(focused) && focused.matches("input, textarea")) {
+			return;
+		}
+		this.display();
+	}
+
+	display(): void {
+		const { containerEl, plugin } = this;
+		const background = plugin.isBackgroundOn();
 		containerEl.empty();
+
+		new Setting(containerEl).setName("This device").setHeading();
+		new Setting(containerEl)
+			.setName("Run background tasks on this device")
+			.setDesc(
+				"Talks to the mailbox: checks for changes, sends your edits and writes incoming notes. Turn this on for one always-on device. Your other devices get shared notes through Obsidian Sync. Saved on this device only.",
+			)
+			.addToggle((toggle) =>
+				toggle.setValue(background).onChange((value) => {
+					plugin.setBackground(value);
+					this.display();
+				}),
+			);
 
 		new Setting(containerEl)
 			.setName("Join with an invite")
@@ -54,24 +83,26 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 						new Notice("That isn't a valid invite.");
 						return;
 					}
-					await this.plugin.joinShare(invite);
+					await plugin.joinShare(invite);
 					this.display();
 				}),
 			);
 
 		new Setting(containerEl).setName("Shares").setHeading();
-		if (settings.shares.length === 0) {
+		const shares = plugin.shares();
+		if (shares.length === 0) {
 			containerEl.createEl("p", {
 				text: "No shares yet. Create one below, or join one with an invite.",
 				cls: "setting-item-description",
 			});
 		}
-		for (const share of settings.shares) {
-			this.displayShare(containerEl, share);
+		for (const share of shares) {
+			this.displayShare(containerEl, share, background);
 		}
 
 		new Setting(containerEl).setName("New share").setHeading();
-		const hasMailbox = settings.mailboxUrl !== "" && settings.ownerCode !== "";
+		const { url, ownerCode } = plugin.data.mailbox.value;
+		const hasMailbox = url !== "" && ownerCode !== "";
 		new Setting(containerEl)
 			.setName("Create a share")
 			.setDesc(
@@ -93,7 +124,7 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 					.setCta()
 					.setDisabled(!hasMailbox)
 					.onClick(async () => {
-						if (await this.plugin.createShare(this.newShareName)) {
+						if (await plugin.createShare(this.newShareName)) {
 							this.newShareName = "";
 							this.display();
 						}
@@ -107,11 +138,8 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 			.addText((text) =>
 				text
 					.setPlaceholder("Paste web app URL")
-					.setValue(settings.mailboxUrl)
-					.onChange(async (value) => {
-						settings.mailboxUrl = value.trim();
-						await this.plugin.saveSettings();
-					}),
+					.setValue(url)
+					.onChange((value) => void plugin.setMailbox({ url: value.trim() })),
 			);
 		new Setting(containerEl)
 			.setName("Owner code")
@@ -120,46 +148,54 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 			)
 			.addText((text) => {
 				text.inputEl.type = "password";
-				text.setValue(settings.ownerCode).onChange(async (value) => {
-					settings.ownerCode = value.trim();
-					await this.plugin.saveSettings();
-				});
+				text.setValue(ownerCode).onChange((value) => void plugin.setMailbox({ ownerCode: value.trim() }));
 			})
 			.addButton((button) =>
 				button.setButtonText("Test").onClick(async () => {
-					await this.plugin.testMailbox();
-					this.display();
+					await plugin.testMailbox();
 				}),
 			);
 
-		new Setting(containerEl).setName("Syncing").setHeading();
-		new Setting(containerEl)
-			.setName("Check for changes every (seconds)")
-			.setDesc(`Edits in shared files also sync a few seconds after you make them. Minimum ${MIN_INTERVAL_SECONDS}.`)
-			.addText((text) =>
-				text.setValue(String(settings.intervalSeconds)).onChange(async (value) => {
-					const seconds = Number.parseInt(value, 10);
-					if (Number.isFinite(seconds) && seconds >= MIN_INTERVAL_SECONDS) {
-						settings.intervalSeconds = seconds;
-						await this.plugin.saveSettings({ intervalChanged: true });
-					}
-				}),
-			);
+		if (background) {
+			new Setting(containerEl).setName("Syncing").setHeading();
+			new Setting(containerEl)
+				.setName("Check for changes every (seconds)")
+				.setDesc(
+					`Edits in shared files also sync shortly after you make them, once Obsidian Sync has finished. Minimum ${MIN_INTERVAL_SECONDS}.`,
+				)
+				.addText((text) =>
+					text.setValue(String(plugin.data.intervalSeconds.value)).onChange((value) => {
+						const seconds = Number.parseInt(value, 10);
+						if (Number.isFinite(seconds) && seconds >= MIN_INTERVAL_SECONDS) {
+							void plugin.setIntervalSeconds(seconds);
+						}
+					}),
+				);
+		}
 	}
 
-	private displayShare(containerEl: HTMLElement, share: ShareConfig): void {
-		const owned = this.plugin.isOwnedShare(share);
+	private displayShare(containerEl: HTMLElement, share: ShareConfig, background: boolean): void {
+		const { plugin } = this;
+		const owned = plugin.isOwnedShare(share);
 		const block = containerEl.createDiv({ cls: "shared-folder-sync-share" });
 		new Setting(block).setName(share.name).setHeading();
+
+		if (!background) {
+			block.createEl("p", {
+				text: "Background tasks are off on this device. Your always-on device syncs this share.",
+				cls: "setting-item-description",
+			});
+		}
 
 		new Setting(block)
 			.setName("Name")
 			.setDesc(share.joined ? "Shared with you. The name is only shown here." : "Shown in the invite.")
 			.addText((text) =>
-				text.setValue(share.name).onChange(async (value) => {
-					share.name = value.trim() || "Shared folder";
-					await this.plugin.saveSettings();
-				}),
+				text
+					.setValue(share.name)
+					.onChange(
+						(value) => void plugin.updateShare(share.id, { name: value.trim() || "Shared folder" }, true),
+					),
 			);
 
 		const pathsDesc = share.joined
@@ -173,10 +209,7 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 					.setPlaceholder("One folder per line")
 					.setValue(share.folders)
 					.setDisabled(share.joined)
-					.onChange(async (value) => {
-						share.folders = value;
-						await this.plugin.saveSettings({ scopeChanged: true });
-					}),
+					.onChange((value) => void plugin.updateShare(share.id, { folders: value }, true)),
 			);
 		new Setting(block)
 			.setName("Single files")
@@ -186,28 +219,27 @@ export class SharedFolderSyncSettingTab extends PluginSettingTab {
 					.setPlaceholder("One file per line")
 					.setValue(share.files)
 					.setDisabled(share.joined)
-					.onChange(async (value) => {
-						share.files = value;
-						await this.plugin.saveSettings({ scopeChanged: true });
-					}),
+					.onChange((value) => void plugin.updateShare(share.id, { files: value }, true)),
 			);
 
-		const status = new Setting(block).setName("Status").setDesc(this.plugin.statusText(share));
+		const status = new Setting(block).setName("Status").setDesc(plugin.statusText(share));
+		if (background) {
+			status.addButton((button) =>
+				button.setButtonText("Send changes now").onClick(async () => {
+					await plugin.syncNow(true, share.id);
+					status.setDesc(plugin.statusText(share));
+				}),
+			);
+		}
 		status
 			.addButton((button) =>
-				button.setButtonText("Sync now").onClick(async () => {
-					await this.plugin.syncNow(true, share.id);
-					status.setDesc(this.plugin.statusText(share));
-				}),
-			)
-			.addButton((button) =>
 				button.setButtonText("Copy invite").onClick(async () => {
-					await this.plugin.copyInvite(share);
+					await plugin.copyInvite(share);
 				}),
 			)
 			.addButton((button) =>
 				confirmButton(button, owned && !share.joined ? "Delete share" : "Leave", async () => {
-					await this.plugin.removeShare(share);
+					await plugin.removeShare(share);
 					this.display();
 				}),
 			);

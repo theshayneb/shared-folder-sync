@@ -37,8 +37,15 @@ export function isSafePath(path: string): boolean {
 	return !parts[0]?.startsWith(".");
 }
 
+/**
+ * Obsidian Sync's "Create conflict file" option names copies like
+ * `Milk (Conflicted copy Phone 202611181430).md`. They are this vault's own
+ * business, so they are never shared.
+ */
+const CONFLICT_COPY = / \(Conflicted copy [^/]*\)(\.[^./]+)?$/;
+
 export function inScope(scope: ShareScope, path: string): boolean {
-	if (!isSafePath(path)) {
+	if (!isSafePath(path) || CONFLICT_COPY.test(path)) {
 		return false;
 	}
 	if (scope.files.includes(path)) {
