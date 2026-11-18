@@ -1,6 +1,6 @@
 {
   "name": "shared-folder-sync",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Share one folder (and a Base) with another Obsidian user through a Google Apps Script mailbox.",
   "main": "main.js",
   "type": "module",

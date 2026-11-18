@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { FakeApp, FakeDataFile, notices, Platform, requests, setRequestHandler } from "./stubs/obsidian";
-import { emptyData, liveShares, serializeData, ShareEntry } from "../src/config";
+import { emptyData, liveShares, readData, serializeData, ShareEntry } from "../src/config";
 import SharedFolderSyncPlugin, { SETTLE } from "../src/main";
 import { scopeKey } from "../src/scope";
 import { createMailbox, FakeMailbox } from "./mailbox-harness";
@@ -259,5 +259,42 @@ describe("data.json shared by your devices", () => {
 		await vi.advanceTimersByTimeAsync(5 * 60_000);
 		const first = syncRequests()[0] as { cursor: number };
 		expect(first.cursor).toBe(4);
+	});
+
+	it("doesn't answer a device still running 0.2.0, which rewrites the old format every 30 seconds", async () => {
+		const old = () =>
+			JSON.stringify({
+				settings: {
+					mailboxUrl: "https://script.google.com/macros/s/abc/exec",
+					ownerCode: "owner",
+					intervalSeconds: 30,
+					shares: [{ id: "legacy", ...groceries({ joined: false }), updatedAt: undefined }],
+				},
+				states: { desktop: { legacy: { cursor: 1317, files: {} } } },
+			});
+		const shared = new FakeDataFile();
+		shared.raw = old();
+		const phone = await startDevice({ desktop: false, dataFile: shared });
+		const tablet = await startDevice({ desktop: false, dataFile: shared });
+
+		for (let i = 0; i < 5; i++) {
+			shared.raw = old();
+			await phone.plugin.onExternalSettingsChange();
+			await tablet.plugin.onExternalSettingsChange();
+			await vi.advanceTimersByTimeAsync(30_000);
+		}
+		expect(shared.writes).toBe(0);
+		expect(phone.plugin.shares().map((s) => s.name)).toEqual(["Groceries"]);
+	});
+
+	it("keeps an older version's keys when saving a real edit", async () => {
+		const shared = new FakeDataFile();
+		shared.raw = JSON.stringify({ settings: { shares: [{ id: "g", ...groceries() }] }, states: { x: {} } });
+		const { plugin } = await startDevice({ desktop: false, dataFile: shared });
+		await plugin.updateShare("g", { name: "Food" });
+
+		const saved = JSON.parse(shared.raw) as Record<string, unknown>;
+		expect(Object.keys(saved).sort()).toEqual(["format", "intervalSeconds", "mailbox", "settings", "shares", "states"]);
+		expect(liveShares(readData(saved).data).map((s) => s.name)).toEqual(["Food"]);
 	});
 });

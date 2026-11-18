@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.3.1
+
+- Fixes the plugin's settings file syncing every 30 seconds while any
+  device still runs 0.2.0. 0.3.0 rewrote the file in the new format
+  whenever it arrived in the old one, and 0.2.0 wrote the old format back
+  30 seconds later. Now a device saves only when you changed something, and
+  leaves parts of the file it doesn't use alone.
+
 ## 0.3.0
 
 Stops your own devices from fighting over shared notes and settings when

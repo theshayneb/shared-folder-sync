@@ -254,19 +254,27 @@ export default class SharedFolderSyncPlugin extends Plugin {
 
 	/**
 	 * Read, merge, then write: re-read data.json, keep the newest version of
-	 * every entry from it and from memory, and write only if the file would
-	 * change. Saves run one at a time.
+	 * every entry from it and from memory, and write only if that adds
+	 * something the file doesn't already say. Saves run one at a time.
+	 *
+	 * "Already says" is judged by content, not by layout: a file written in an
+	 * older format (say, by a device still running 0.2.0) is not rewritten
+	 * just to change its format, or two versions would rewrite it back and
+	 * forth. Keys this version doesn't own are left as they are.
 	 */
 	persist(): Promise<void> {
 		this.saveChain = this.saveChain
 			.then(async () => {
+				const now = Date.now();
 				const raw: unknown = await this.loadData();
-				const merged = pruneTombstones(mergeData(readData(raw).data, this.data), Date.now());
+				const disk = pruneTombstones(readData(raw).data, now);
+				const merged = pruneTombstones(mergeData(disk, this.data), now);
 				this.data = merged;
-				const out = serializeData(merged);
-				if (canonicalJson(out) !== canonicalJson(raw ?? null)) {
-					await this.saveData(out);
+				if (canonicalJson(merged) === canonicalJson(disk)) {
+					return;
 				}
+				const others = raw && typeof raw === "object" && !Array.isArray(raw) ? raw : {};
+				await this.saveData({ ...others, ...serializeData(merged) });
 			})
 			.catch((error: unknown) => {
 				console.error("Shared Folder Sync: couldn't save settings", error);
